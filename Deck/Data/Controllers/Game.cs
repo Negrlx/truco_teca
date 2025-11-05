@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using truco_teca.Deck.Data.Controllers.Calls;
 using truco_teca.Deck.Data.Models;
 
 namespace truco_teca.Deck.Data.Controllers
@@ -34,12 +35,77 @@ namespace truco_teca.Deck.Data.Controllers
                 Console.WriteLine($"\nVira: {vira}\n");
 
                 DealHands(deck);
-                TrucoCall truco = new TrucoCall();
-                int winningTeam = PlayHand(truco);
 
+                RecetaCall receta = new RecetaCall();
+                receta.DetectarReceta(players);
+
+                Dictionary<Player, int> envidoValues = players.ToDictionary(
+                    p => p,
+                    p => EnvidoCall.EnvidoPoints(p.GetHand())
+                );
+
+                Console.WriteLine("\nValores de Envido:");
+                foreach (var kvp in envidoValues.OrderBy(p => p.Key.Team))
+                {
+                    Console.WriteLine($"Equipo {kvp.Key.Team} - {kvp.Key.Name}: {kvp.Value} puntos");
+                }
+
+                // === FLOR ===
+                FlorCall flor = new FlorCall();
+                Dictionary<Player, int> florValues = players.ToDictionary(
+                    p => p,
+                    p => FlorCall.HasFlor(p.GetHand()) ? FlorCall.FlorPoints(p.GetHand()) : 0
+                );
+
+                foreach (var player in players)
+                {
+                    if (FlorCall.HasFlor(player.GetHand()))
+                        flor.RegistrarFlor(player);
+                }
+
+                Console.WriteLine("\nValores de Flor:");
+                foreach (var kvp in florValues.Where(f => f.Value > 0).OrderBy(p => p.Key.Team))
+                {
+                    Console.WriteLine($"Equipo {kvp.Key.Team} - {kvp.Key.Name}: {kvp.Value} puntos");
+                }
+
+                // === CANTOS ===
+                TrucoCall truco = new TrucoCall();
+                EnvidoCall envido = new EnvidoCall(pointsToWin);
+
+                int winningTeam = PlayHand(truco, envido, envidoValues, flor, florValues);
+
+                // === RESOLVER ENVIDO ===
+                if (envido.IsAccepted)
+                {
+                    int team1Max = players.Where(p => p.Team == 1).Select(p => envidoValues[p]).Max();
+                    int team2Max = players.Where(p => p.Team == 2).Select(p => envidoValues[p]).Max();
+                    int envidoWinner = team1Max >= team2Max ? 1 : 2;
+                    teamScore[envidoWinner - 1] += envido.ResolveWinner(envidoWinner, teamScore);
+                }
+                else if (envido.WasRejected)
+                {
+                    teamScore[envido.CallingTeam - 1] += envido.ResolveWinner(envido.CallingTeam, teamScore);
+                }
+
+                // === RESOLVER FLOR ===
+                flor.ReportarFlorQuemada();
+                int florPuntos = flor.ResolverFlor(florValues, teamScore, pointsToWin);
+                if (florPuntos > 0)
+                {
+                    int equipoGanador = flor.FlorPlayers
+                        .Where(kvp => !flor.FlorQuemadas.Contains(kvp.Key))
+                        .GroupBy(kvp => kvp.Key.Team)
+                        .OrderByDescending(g => g.Max(p => florValues[p.Key]))
+                        .First().Key;
+
+                    teamScore[equipoGanador - 1] += florPuntos;
+                    Console.WriteLine($"Equipo {equipoGanador} gana {florPuntos} punto(s) por Flor.");
+                }
+
+                // === RESOLVER TRUCO ===
                 if (truco.WasRejected)
                 {
-                    // winningTeam ya debe ser el equipo que cantó (CallingTeam)
                     int puntos = truco.ResolveWinner(winningTeam, pointsToWin, teamScore);
                     if (puntos == -1) break;
                     teamScore[winningTeam - 1] += puntos;
@@ -52,17 +118,22 @@ namespace truco_teca.Deck.Data.Controllers
                 if (puntosGanados == -1) break;
 
                 teamScore[winningTeam - 1] += puntosGanados;
+                
                 Console.WriteLine($"\nEquipo {winningTeam} gana la mano. Marcador: Equipo1 {teamScore[0]} - Equipo2 {teamScore[1]}");
-
+                receta.ResolverReceta(teamScore);
                 dealerIndex = (dealerIndex + 1) % players.Count;
             }
 
             int ganador = teamScore[0] > teamScore[1] ? 1 : 2;
+
             Console.WriteLine($"\n=== ¡Equipo {ganador} gana el juego! ===");
         }
 
+
         private void DealHands(Stack<Card> deck)
         {
+            
+
             var hands = Dealer.DealHands(deck, players.Count);
             for (int i = 0; i < players.Count; i++)
                 players[i].SetHand(hands[i]);
@@ -82,7 +153,7 @@ namespace truco_teca.Deck.Data.Controllers
             return orden;
         }
 
-        private int PlayHand(TrucoCall truco)
+        private int PlayHand(TrucoCall truco, EnvidoCall envido, Dictionary<Player, int> envidoValues, FlorCall flor, Dictionary<Player, int> florValues)
         {
             int[] roundsWon = new int[2];
             List<Player> turnOrder = GetTurnOrder();
@@ -99,25 +170,39 @@ namespace truco_teca.Deck.Data.Controllers
                     Console.WriteLine($"\nTurno de {current.Name}:");
                     current.ShowHand();
 
-                    Console.WriteLine("¿Deseas cantar Truco? (s/n)");
+                    Console.WriteLine("¿Deseas hacer un canto? (s/n)");
                     string? canto = Console.ReadLine()?.Trim().ToLower();
                     if (canto == "s")
-                        truco.CallTruco(current.Team);
+                    {
+                        Console.WriteLine("¿Qué quieres cantar? (envido / truco / flor / a ley / reportar flor quemada)");
+                        string? tipoCanto = Console.ReadLine()?.Trim().ToLower();
+
+                        if (tipoCanto == "envido" && round == 1 && !envido.IsActive)
+                            envido.CallEnvido(current.Team, current, flor);
+                        else if (tipoCanto == "envido" && round != 1)
+                            Console.WriteLine("El Envido solo puede cantarse en la primera ronda.");
+                        else if (tipoCanto == "truco")
+                            truco.CallTruco(current.Team);
+                        else if (tipoCanto == "flor")
+                            flor.CallFlor(current, round);
+                        else if (tipoCanto == "a ley" && round == 1)
+                            flor.CantarALey(current);
+                        else if (tipoCanto == "reportar flor quemada")
+                            flor.ReportarFlorQuemada();
+                        else
+                            Console.WriteLine("Canto inválido.");
+
+                    }
 
                     if (truco.WasRejected)
-                    {
                         return truco.CallingTeam;
-                    }
 
                     Card played = SelectCard(current);
                     playedCards[current] = played;
                     Console.WriteLine($"{current.Name} juega {played}");
 
-                    // (la comprobación de antes ya no es necesaria, pero voy a quemar esta mierda si sigue sin servir)
                     if (truco.WasRejected)
-                    {
                         return truco.CallingTeam;
-                    }
                 }
 
                 int winnerTeam = TrucoRules.DetermineRoundWinner(playedCards);
@@ -156,5 +241,78 @@ namespace truco_teca.Deck.Data.Controllers
                 Console.WriteLine("Entrada inválida.");
             }
         }
+
+        public void RunSimulation()
+        {
+            Console.WriteLine("\n=== MODO SIMULACRO ===\n");
+
+            // === Vira manual ===
+            Console.Write("Ingresa la Vira (ej: 7 Gold, 1 Sword): ");
+            Card vira = ParseCardInput(Console.ReadLine());
+            TrucoRules.SetVira(vira);
+            Console.WriteLine($"Vira seleccionada -> {vira}\n");
+
+            // === Cartas manuales por jugador ===
+            foreach (var p in players)
+            {
+                Console.WriteLine($"Ingresa las 3 cartas de {p.Name} separadas por coma (ej: 1 Gold, 3 Sword, 7 Cup)");
+                Console.Write("> ");
+                string input = Console.ReadLine();
+                var cards = input.Split(',')
+                                 .Select(x => ParseCardInput(x.Trim()))
+                                 .ToList();
+                p.SetHand(cards);
+            }
+
+            // === Lógica inicial igual que Start() ===
+            RecetaCall receta = new RecetaCall();
+            receta.DetectarReceta(players);
+
+            Dictionary<Player, int> envidoValues = players.ToDictionary(
+                p => p,
+                p => EnvidoCall.EnvidoPoints(p.GetHand())
+            );
+
+            FlorCall flor = new FlorCall();
+            Dictionary<Player, int> florValues = players.ToDictionary(
+                p => p,
+                p => FlorCall.HasFlor(p.GetHand()) ? FlorCall.FlorPoints(p.GetHand()) : 0
+            );
+
+            // IMPORTANTE: registrar Flor igual que en Start()
+            foreach (var p in players)
+            {
+                if (FlorCall.HasFlor(p.GetHand()))
+                    flor.RegistrarFlor(p);
+            }
+
+            TrucoCall truco = new TrucoCall();
+            EnvidoCall envido = new EnvidoCall(pointsToWin);
+
+            // === Mostrar manos para verificación (útil en simulación) ===
+            Console.WriteLine("\n=== Manos cargadas ===");
+            foreach (var p in players)
+            {
+                Console.WriteLine($"{p.Name}: {string.Join(", ", p.GetHand())}");
+            }
+
+            Console.WriteLine("\n=== Comienza la simulación de la mano ===\n");
+
+            // === Jugar mano manual ===
+            int ganador = PlayHand(truco, envido, envidoValues, flor, florValues);
+
+            Console.WriteLine($"\n=== Fin de simulación: ganó Equipo {ganador} ===");
+        }
+
+
+        private Card ParseCardInput(string raw)
+        {
+            string[] parts = raw.Trim().Split(' ');
+            int value = int.Parse(parts[0]);
+            CardSuit suit = Enum.Parse<CardSuit>(parts[1], true);
+            return new Card(value, suit);
+        }
+
+
     }
 }

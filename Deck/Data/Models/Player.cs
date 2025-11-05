@@ -14,6 +14,10 @@ namespace truco_teca.Deck.Data.Controllers
             Team = team;
             hand = new List<Card>();
         }
+        public List<Card> GetHand()
+        {
+            return new List<Card>(hand);
+        }
 
         public void SetHand(List<Card> cards)
         {
